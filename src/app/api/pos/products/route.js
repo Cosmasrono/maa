@@ -1,0 +1,58 @@
+import prisma from "@/lib/prisma";
+import { requireAuth } from "@/lib/auth";
+import { branchPrice } from "@/lib/pricing";
+
+export async function GET(req) {
+  const { user, error } = await requireAuth("process_sales");
+  if (error) return error;
+  const { searchParams } = new URL(req.url);
+  const categoryId = searchParams.get("category_id");
+  const q = searchParams.get("q") || "";
+  // ?all=1 returns the whole active catalog so the POS can keep selling offline
+  const all = searchParams.get("all") === "1";
+
+  const products = await prisma.product.findMany({
+    where: {
+      isActive: true,
+      ...(user.branchId && { branchStocks: { some: { branchId: user.branchId } } }),
+      ...(categoryId && { categoryId }),
+      ...(q && {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { sku: { contains: q, mode: "insensitive" } },
+          { genericName: { contains: q, mode: "insensitive" } },
+          { brandName: { contains: q, mode: "insensitive" } },
+          { barcode: q },
+        ],
+      }),
+    },
+    include: {
+      category: true,
+      branchStocks: user.branchId ? { where: { branchId: user.branchId } } : true,
+    },
+    orderBy: { name: "asc" },
+    take: all ? 5000 : 60,
+  });
+
+  return Response.json({
+    data: products.map((p) => ({
+      id: p.id,
+      name: p.name,
+      sku: p.sku,
+      barcode: p.barcode,
+      // The till's branch price (falls back to the product default).
+      sellingPrice: user.branchId ? branchPrice(p, p.branchStocks[0]) : p.sellingPrice,
+      defaultPrice: p.sellingPrice,
+      costPrice: p.costPrice,
+      category: p.category?.name,
+      categoryId: p.categoryId,
+      genericName: p.genericName,
+      brandName: p.brandName,
+      packSize: p.packSize,
+      prescriptionRequired: p.prescriptionRequired,
+      stock: user.branchId
+        ? p.branchStocks.reduce((s, b) => s + b.quantityInStock, 0)
+        : p.quantityInStock,
+    })),
+  });
+}
